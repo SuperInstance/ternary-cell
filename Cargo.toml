@@ -1,0 +1,6 @@
+[package]
+name = "ternary-cell"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Cellular computing inspired by room-cell and biological cells"
