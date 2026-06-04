@@ -94,6 +94,14 @@ fn main() {
 
 Part of the SuperInstance ternary crate family. `ternary-cell` is the compute primitive layer. It can be driven by `ternary-compiler-v2` for programmatic cell behavior, visualized with `ternary-visualization`, and diffed over time with `ternary-diff`. The `TernaryMessenger` type maps to the standard {-1, 0, +1} encoding used throughout the ecosystem.
 
+## Known Limitations
+
+- **Signal count doesn't matter, only sign.** `TernaryCell::perceive()` clamps the combined signal sum to [-1, 1]. A cell receiving 100 Signal messages and a cell receiving 1 Signal message both end up with `ternary_value = 1`.
+- **Synchronous tick is O(n²).** Signal propagation collects all emissions then delivers them, making each tick quadratic in grid population.
+- **No asynchronous or stochastic mode.** All cells emit, receive, and tick in lockstep.
+- **Consensus uses plurality, which can return Zero on ties.** When Pos and Neg counts are equal (even if Zero count is low), `Tissue::consensus()` returns 0 (neutral).
+- **Fixed-size grid with no sparse optimization.** `CellGrid` uses `Vec<Option<TernaryCell>>`, so memory is proportional to width × height regardless of how many cells are alive.
+
 ## License
 
 MIT
