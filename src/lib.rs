@@ -263,20 +263,21 @@ impl CellGrid {
     /// Run one tick across all cells.
     pub fn tick_all(&mut self) -> u32 {
         self.propagate_signals();
-        let mut alive = 0u32;
         for cell in &mut self.cells {
             if let Some(c) = cell {
                 if c.is_alive() {
                     c.tick();
-                    alive += 1;
                 }
             }
         }
-        // Remove apoptotic cells
+        // Remove apoptotic cells and count survivors.
+        let mut alive = 0u32;
         for cell in &mut self.cells {
             if let Some(c) = cell {
                 if !c.is_alive() {
                     *cell = None;
+                } else {
+                    alive += 1;
                 }
             }
         }
