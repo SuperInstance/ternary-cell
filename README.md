@@ -105,3 +105,11 @@ Part of the SuperInstance ternary crate family. `ternary-cell` is the compute pr
 ## License
 
 MIT
+
+## See Also
+- **ternary-automata** — related
+- **ternary-life** — related
+- **ternary-genome** — related
+- **ternary-agent** — related
+- **ternary-ecosystem** — related
+
