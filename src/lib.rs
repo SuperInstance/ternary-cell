@@ -1,544 +1,312 @@
-//! # ternary-cell
-//!
-//! Cellular computing inspired by room-cell and biological cells.
-//! TernaryCell with tick cycle (predict→perceive→surprise→vibe→gc→conservation),
-//! CellGrid, cell signaling, apoptosis and division, tissue-level coordination.
-//! Maps to construct-core compute model.
-
 #![forbid(unsafe_code)]
+//! Ternary cell — the atomic unit. 3 bytes. Fits in a cache line.
+//! Instantiate a million of these without thinking.
+//!
+//! The cell knows three things:
+//! - What it is (state: -1, 0, +1)
+//! - How long it's been that way (dwell: how many ticks in current state)
+//! - How many times it's changed (flips: lifetime transition count)
+//!
+//! That's it. Everything else is computed from populations of these.
 
-/// Ternary messenger signal between cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TernaryMessenger {
-    /// Positive signal: grow, activate, promote.
-    Signal,
-    /// Neutral: maintain, acknowledge.
-    Silence,
-    /// Negative signal: inhibit, suppress, retract.
-    Suppress,
-}
-
-impl TernaryMessenger {
-    pub fn to_ternary(self) -> i8 {
-        match self {
-            TernaryMessenger::Signal => 1,
-            TernaryMessenger::Silence => 0,
-            TernaryMessenger::Suppress => -1,
-        }
-    }
-
-    pub fn from_ternary(v: i8) -> Option<Self> {
-        match v {
-            1 => Some(TernaryMessenger::Signal),
-            0 => Some(TernaryMessenger::Silence),
-            -1 => Some(TernaryMessenger::Suppress),
-            _ => None,
-        }
-    }
-
-    /// Combine two messengers (max wins).
-    pub fn combine(a: Self, b: Self) -> Self {
-        let v = a.to_ternary().max(b.to_ternary());
-        Self::from_ternary(v).unwrap()
-    }
-}
-
-/// Cell state in the lifecycle.
+/// A single ternary cell. 3 bytes. No heap. No strings. No generics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CellState {
-    /// Alive and active.
-    Active,
-    /// Marked for removal.
-    Apoptotic,
-    /// Just divided, recovering.
-    Dividing,
+pub struct Cell {
+    pub state: i8,    // -1, 0, or +1
+    pub dwell: u8,    // ticks in current state (wraps at 255)
+    pub flips: u8,    // lifetime transition count (wraps at 255)
 }
 
-/// A single ternary cell with internal state and tick lifecycle.
-#[derive(Debug, Clone)]
-pub struct TernaryCell {
-    pub id: u64,
-    pub energy: i32,
-    pub state: CellState,
-    /// Internal ternary state: -1, 0, or +1.
-    pub ternary_value: i8,
-    /// Prediction for next tick.
-    prediction: i8,
-    /// Accumulated surprise.
-    surprise: i32,
-    /// Incoming messages.
-    inbox: Vec<TernaryMessenger>,
-    /// Tick counter.
-    tick_count: u64,
-    /// Generation (incremented on division).
-    pub generation: u32,
+impl Cell {
+    /// Create a cell in any state.
+    #[inline]
+    pub fn new(state: i8) -> Self {
+        Self { state: state.clamp(-1, 1), dwell: 0, flips: 0 }
+    }
+
+    /// Create at +1.
+    #[inline]
+    pub fn pos() -> Self { Self::new(1) }
+
+    /// Create at 0.
+    #[inline]
+    pub fn zero() -> Self { Self::new(0) }
+
+    /// Create at -1.
+    #[inline]
+    pub fn neg() -> Self { Self::new(-1) }
+
+    /// Create a random cell from a u8 seed (use any bit of entropy).
+    #[inline]
+    pub fn from_byte(b: u8) -> Self {
+        match b % 3 {
+            0 => Self::neg(),
+            1 => Self::zero(),
+            _ => Self::pos(),
+        }
+    }
+
+    /// Set state. Returns true if state actually changed.
+    #[inline]
+    pub fn set(&mut self, new_state: i8) -> bool {
+        let s = new_state.clamp(-1, 1);
+        if s != self.state {
+            self.state = s;
+            self.dwell = 0;
+            self.flips = self.flips.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Tick — increment dwell time.
+    #[inline]
+    pub fn tick(&mut self) {
+        self.dwell = self.dwell.saturating_add(1);
+    }
+
+    /// Flip to opposite signed state (+1 ↔ -1). 0 stays 0.
+    #[inline]
+    pub fn flip(&mut self) {
+        self.state = -self.state;
+        self.flips = self.flips.saturating_add(1);
+        self.dwell = 0;
+    }
+
+    /// Tunnel from 0 to target state (forgiveness).
+    #[inline]
+    pub fn tunnel(&mut self, target: i8) -> bool {
+        if self.state == 0 {
+            self.set(target);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Trap into 0 state.
+    #[inline]
+    pub fn trap(&mut self) -> bool {
+        if self.state != 0 {
+            self.set(0);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Is settled (dwelling for a long time)?
+    #[inline]
+    pub fn is_settled(&self, threshold: u8) -> bool {
+        self.dwell >= threshold
+    }
+
+    /// Is active (not 0)?
+    #[inline]
+    pub fn is_active(&self) -> bool { self.state != 0 }
+
+    /// Is at spindle (0)?
+    #[inline]
+    pub fn is_spindle(&self) -> bool { self.state == 0 }
+
+    /// Is oscillating (high flip count)?
+    #[inline]
+    pub fn is_oscillating(&self, threshold: u8) -> bool {
+        self.flips >= threshold
+    }
+
+    /// Signed charge.
+    #[inline]
+    pub fn charge(&self) -> i8 { self.state }
+
+    /// Absolute charge.
+    #[inline]
+    pub fn abs_charge(&self) -> i8 { self.state.abs() }
 }
 
-impl TernaryCell {
-    pub fn new(id: u64) -> Self {
-        Self {
-            id,
-            energy: 10,
-            state: CellState::Active,
-            ternary_value: 0,
-            prediction: 0,
-            surprise: 0,
-            inbox: Vec::new(),
-            tick_count: 0,
-            generation: 0,
+// ============================================================
+// Population functions — operate on slices, no allocations
+// ============================================================
+
+/// Count each state in a population. Returns (neg, zero, pos).
+pub fn census(pop: &[Cell]) -> (usize, usize, usize) {
+    let mut n = 0usize;
+    let mut z = 0usize;
+    let mut p = 0usize;
+    for c in pop {
+        match c.state {
+            -1 => n += 1,
+            0 => z += 1,
+            _ => p += 1,
         }
     }
-
-    pub fn with_value(id: u64, value: i8) -> Self {
-        let mut cell = Self::new(id);
-        cell.ternary_value = value.clamp(-1, 1);
-        cell
-    }
-
-    /// Receive a messenger signal.
-    pub fn receive(&mut self, msg: TernaryMessenger) {
-        self.inbox.push(msg);
-    }
-
-    /// Step 1: Predict next ternary value based on current state and inbox.
-    pub fn predict(&mut self) {
-        let combined: i32 = self.inbox.iter().map(|m| m.to_ternary() as i32).sum();
-        self.prediction = if combined > 0 { 1 } else if combined < 0 { -1 } else { self.ternary_value };
-    }
-
-    /// Step 2: Perceive — update value based on combined signals.
-    pub fn perceive(&mut self) {
-        let combined: i32 = self.inbox.iter().map(|m| m.to_ternary() as i32).sum();
-        if combined != 0 {
-            self.ternary_value = combined.clamp(-1, 1) as i8;
-        }
-    }
-
-    /// Step 3: Compute surprise (prediction error).
-    pub fn compute_surprise(&mut self) -> i32 {
-        self.surprise = (self.ternary_value as i32 - self.prediction as i32).abs();
-        self.surprise
-    }
-
-    /// Step 4: Vibe — adjust energy based on surprise.
-    pub fn vibe(&mut self) {
-        self.energy -= self.surprise;
-        // Being in sync with neighbors gives energy
-        if self.surprise == 0 {
-            self.energy += 1;
-        }
-    }
-
-    /// Step 5: GC — clear inbox, reclaim resources.
-    pub fn gc(&mut self) {
-        self.inbox.clear();
-    }
-
-    /// Step 6: Conservation — enforce energy bounds and check apoptosis.
-    pub fn conservation(&mut self) {
-        self.energy = self.energy.clamp(0, 20);
-        if self.energy == 0 {
-            self.state = CellState::Apoptotic;
-        }
-        self.tick_count += 1;
-    }
-
-    /// Run a full tick cycle.
-    pub fn tick(&mut self) -> i32 {
-        self.predict();
-        self.perceive();
-        let surprise = self.compute_surprise();
-        self.vibe();
-        self.gc();
-        self.conservation();
-        surprise
-    }
-
-    /// Check if cell can divide (enough energy and active).
-    pub fn can_divide(&self) -> bool {
-        self.energy >= 10 && self.state == CellState::Active
-    }
-
-    /// Divide: create a daughter cell, halve energy.
-    pub fn divide(&mut self, daughter_id: u64) -> Option<TernaryCell> {
-        if !self.can_divide() {
-            return None;
-        }
-        self.energy /= 2;
-        self.state = CellState::Dividing;
-        Some(TernaryCell {
-            id: daughter_id,
-            energy: self.energy,
-            state: CellState::Active,
-            ternary_value: self.ternary_value,
-            prediction: self.ternary_value,
-            surprise: 0,
-            inbox: Vec::new(),
-            tick_count: 0,
-            generation: self.generation + 1,
-        })
-    }
-
-    /// Emit current value as a messenger.
-    pub fn emit(&self) -> TernaryMessenger {
-        TernaryMessenger::from_ternary(self.ternary_value).unwrap_or(TernaryMessenger::Silence)
-    }
-
-    pub fn is_alive(&self) -> bool {
-        self.state != CellState::Apoptotic
-    }
+    (n, z, p)
 }
 
-/// A grid of ternary cells.
-#[derive(Debug, Clone)]
-pub struct CellGrid {
-    pub width: usize,
-    pub height: usize,
-    pub cells: Vec<Option<TernaryCell>>,
-    pub next_id: u64,
+/// Sum of charges (gamma). Fast, no allocation.
+pub fn gamma(pop: &[Cell]) -> i64 {
+    pop.iter().map(|c| c.state as i64).sum()
 }
 
-impl CellGrid {
-    pub fn new(width: usize, height: usize) -> Self {
-        let cells = vec![None; width * height];
-        Self { width, height, cells, next_id: 0 }
-    }
+/// Absolute gamma (|gamma|). Measures total charge ignoring sign.
+pub fn abs_gamma(pop: &[Cell]) -> i64 {
+    pop.iter().map(|c| c.state.abs() as i64).sum()
+}
 
-    /// Place a cell at a position.
-    pub fn place(&mut self, x: usize, y: usize, value: i8) -> bool {
-        if x >= self.width || y >= self.height { return false; }
-        let id = self.next_id;
-        self.next_id += 1;
-        self.cells[y * self.width + x] = Some(TernaryCell::with_value(id, value));
-        true
-    }
+/// Fraction in each state. Returns (frac_neg, frac_zero, frac_pos).
+pub fn fractions(pop: &[Cell]) -> (f64, f64, f64) {
+    let (n, z, p) = census(pop);
+    let total = pop.len() as f64;
+    (n as f64 / total, z as f64 / total, p as f64 / total)
+}
 
-    /// Get cell at position.
-    pub fn get(&self, x: usize, y: usize) -> Option<&TernaryCell> {
-        if x >= self.width || y >= self.height { return None; }
-        self.cells[y * self.width + x].as_ref()
-    }
+/// Mean flip rate (how often cells are changing).
+pub fn flip_rate(pop: &[Cell]) -> f64 {
+    if pop.is_empty() { return 0.0; }
+    pop.iter().map(|c| c.flips as f64).sum::<f64>() / pop.len() as f64
+}
 
-    /// Get mutable cell at position.
-    pub fn get_mut(&mut self, x: usize, y: usize) -> Option<&mut TernaryCell> {
-        if x >= self.width || y >= self.height { return None; }
-        self.cells[y * self.width + x].as_mut()
-    }
+/// Mean dwell time (how settled the population is).
+pub fn mean_dwell(pop: &[Cell]) -> f64 {
+    if pop.is_empty() { return 0.0; }
+    pop.iter().map(|c| c.dwell as f64).sum::<f64>() / pop.len() as f64
+}
 
-    /// Get neighbor positions (4-connected).
-    pub fn neighbors(&self, x: usize, y: usize) -> Vec<(usize, usize)> {
-        let mut result = Vec::new();
-        if x > 0 { result.push((x - 1, y)); }
-        if x + 1 < self.width { result.push((x + 1, y)); }
-        if y > 0 { result.push((x, y - 1)); }
-        if y + 1 < self.height { result.push((x, y + 1)); }
-        result
-    }
+/// Entropy of the state distribution (Shannon, base 2).
+pub fn entropy(pop: &[Cell]) -> f64 {
+    let (n, z, p) = fractions(pop);
+    let mut h = 0.0;
+    if n > 0.0 { h -= n * n.log2(); }
+    if z > 0.0 { h -= z * z.log2(); }
+    if p > 0.0 { h -= p * p.log2(); }
+    h
+}
 
-    /// Signal propagation: cells send messages to neighbors.
-    pub fn propagate_signals(&mut self) {
-        // Collect emissions first to avoid borrow issues
-        let width = self.width;
-        let height = self.height;
-        let mut emissions: Vec<(usize, usize, TernaryMessenger)> = Vec::new();
-        for y in 0..height {
-            for x in 0..width {
-                if let Some(cell) = self.get(x, y) {
-                    if cell.is_alive() {
-                        emissions.push((x, y, cell.emit()));
-                    }
-                }
-            }
-        }
-        // Now deliver
-        for (x, y, msg) in emissions {
-            for (nx, ny) in self.neighbors(x, y) {
-                if let Some(neighbor) = self.get_mut(nx, ny) {
-                    neighbor.receive(msg);
-                }
-            }
-        }
-    }
+/// Health diagnostic from population state.
+pub fn health(pop: &[Cell]) -> Health {
+    if pop.is_empty() { return Health::Empty; }
+    let (_, z, _) = census(pop);
+    let frac_zero = z as f64 / pop.len() as f64;
+    let rate = flip_rate(pop);
 
-    /// Run one tick across all cells.
-    pub fn tick_all(&mut self) -> u32 {
-        self.propagate_signals();
-        for cell in &mut self.cells {
-            if let Some(c) = cell {
-                if c.is_alive() {
-                    c.tick();
-                }
-            }
-        }
-        // Remove apoptotic cells and count survivors.
-        let mut alive = 0u32;
-        for cell in &mut self.cells {
-            if let Some(c) = cell {
-                if !c.is_alive() {
-                    *cell = None;
-                } else {
-                    alive += 1;
-                }
-            }
-        }
-        alive
-    }
+    if frac_zero > 0.95 { Health::Dead }
+    else if frac_zero > 0.8 { Health::Critical }
+    else if rate < 0.5 { Health::Settled }
+    else if rate > 5.0 { Health::Chaotic }
+    else { Health::Alive }
+}
 
-    /// Count alive cells.
-    pub fn alive_count(&self) -> usize {
-        self.cells.iter().filter(|c| c.as_ref().map_or(false, |c| c.is_alive())).count()
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    Empty,    // No cells
+    Dead,     // 95%+ at 0
+    Critical, // 80%+ at 0
+    Settled,  // Low flip rate
+    Alive,    // Normal activity
+    Chaotic,  // Very high flip rate
+}
 
-    /// Tissue-level ternary balance.
-    pub fn tissue_balance(&self) -> (usize, usize, usize) {
-        let mut pos = 0;
-        let mut zero = 0;
-        let mut neg = 0;
-        for cell in &self.cells {
-            if let Some(c) = cell {
-                if c.is_alive() {
-                    match c.ternary_value {
-                        1 => pos += 1,
-                        0 => zero += 1,
-                        -1 => neg += 1,
-                        _ => {}
-                    }
-                }
-            }
-        }
-        (pos, zero, neg)
+/// Tick entire population.
+pub fn tick_all(pop: &mut [Cell]) {
+    for c in pop.iter_mut() { c.tick(); }
+}
+
+/// Apply a rule to entire population. Rule takes current state + index, returns new state.
+pub fn apply_rule(pop: &mut [Cell], rule: fn(i8, usize) -> i8) {
+    for (i, c) in pop.iter_mut().enumerate() {
+        c.set(rule(c.state, i));
     }
 }
 
-/// Tissue coordinator for grid-level operations.
-#[derive(Debug, Clone)]
-pub struct Tissue {
-    pub grid: CellGrid,
+/// Apply a neighbor rule. Takes own state + left neighbor + right neighbor, returns new state.
+pub fn apply_neighbor_rule(pop: &mut [Cell], rule: fn(i8, i8, i8) -> i8) {
+    if pop.len() < 3 { return; }
+    let n = pop.len();
+    let mut next = vec![0i8; n];
+    for i in 0..n {
+        let left = pop[(i + n - 1) % n].state;
+        let right = pop[(i + 1) % n].state;
+        next[i] = rule(pop[i].state, left, right);
+    }
+    for (i, c) in pop.iter_mut().enumerate() {
+        c.set(next[i]);
+    }
 }
 
-impl Tissue {
-    pub fn new(width: usize, height: usize) -> Self {
-        Self { grid: CellGrid::new(width, height) }
-    }
+/// Initialize a population from a byte slice (any entropy source).
+pub fn from_bytes(len: usize, seed: &[u8]) -> Vec<Cell> {
+    (0..len).map(|i| Cell::from_byte(seed[i % seed.len()])).collect()
+}
 
-    /// Fill grid with a pattern.
-    pub fn fill_pattern(&mut self, pattern: &[i8]) {
-        for (i, &val) in pattern.iter().enumerate() {
-            let x = i % self.grid.width;
-            let y = i / self.grid.width;
-            self.grid.place(x, y, val);
-        }
+/// Simple LCG PRNG for reproducible experiments.
+pub struct Rng { state: u64 }
+impl Rng {
+    pub fn new(seed: u64) -> Self { Self { state: seed } }
+    pub fn next_u8(&mut self) -> u8 {
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (self.state >> 56) as u8
     }
+    pub fn next_bool(&mut self) -> bool { self.next_u8() & 1 == 1 }
+}
 
-    /// Run tissue for N ticks, return alive count at end.
-    pub fn run(&mut self, ticks: usize) -> u32 {
-        for _ in 0..ticks {
-            self.grid.tick_all();
-        }
-        self.grid.alive_count() as u32
+/// Create random population with controlled distribution.
+pub fn random_pop(len: usize, frac_neg: f64, frac_zero: f64, rng: &mut Rng) -> Vec<Cell> {
+    let n_neg = (len as f64 * frac_neg) as usize;
+    let n_zero = (len as f64 * frac_zero) as usize;
+    let mut pop = Vec::with_capacity(len);
+    for i in 0..len {
+        if i < n_neg { pop.push(Cell::neg()); }
+        else if i < n_neg + n_zero { pop.push(Cell::zero()); }
+        else { pop.push(Cell::pos()); }
     }
-
-    /// Check if tissue has converged (all cells have same ternary value).
-    pub fn is_converged(&self) -> bool {
-        let mut values = std::collections::HashSet::new();
-        for cell in &self.grid.cells {
-            if let Some(c) = cell {
-                if c.is_alive() {
-                    values.insert(c.ternary_value);
-                }
-            }
-        }
-        values.len() <= 1
+    // Shuffle
+    for i in (1..pop.len()).rev() {
+        let j = (rng.next_u8() as usize) % (i + 1);
+        pop.swap(i, j);
     }
-
-    /// Compute tissue-level consensus ternary value.
-    pub fn consensus(&self) -> i8 {
-        let (pos, zero, neg) = self.grid.tissue_balance();
-        if pos > zero && pos > neg { 1 }
-        else if neg > pos && neg > zero { -1 }
-        else { 0 }
-    }
+    pop
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_messenger_roundtrip() {
-        for v in [-1i8, 0, 1] {
-            assert_eq!(TernaryMessenger::from_ternary(v).unwrap().to_ternary(), v);
-        }
-    }
+    #[test] fn cell_new() { assert_eq!(Cell::new(1).state, 1); assert_eq!(Cell::new(-1).state, -1); assert_eq!(Cell::new(0).state, 0); }
+    #[test] fn cell_clamp() { assert_eq!(Cell::new(5).state, 1); assert_eq!(Cell::new(-5).state, -1); }
+    #[test] fn cell_set_same() { let mut c = Cell::pos(); assert!(!c.set(1)); assert_eq!(c.dwell, 0); }
+    #[test] fn cell_set_change() { let mut c = Cell::pos(); assert!(c.set(-1)); assert_eq!(c.flips, 1); }
+    #[test] fn cell_tick() { let mut c = Cell::pos(); c.tick(); c.tick(); assert_eq!(c.dwell, 2); }
+    #[test] fn cell_flip() { let mut c = Cell::pos(); c.flip(); assert_eq!(c.state, -1); }
+    #[test] fn cell_flip_zero() { let mut c = Cell::zero(); c.flip(); assert_eq!(c.state, 0); }
+    #[test] fn cell_tunnel() { let mut c = Cell::zero(); assert!(c.tunnel(1)); assert_eq!(c.state, 1); }
+    #[test] fn cell_tunnel_fail() { let mut c = Cell::pos(); assert!(!c.tunnel(1)); }
+    #[test] fn cell_trap() { let mut c = Cell::pos(); assert!(c.trap()); assert_eq!(c.state, 0); }
+    #[test] fn cell_trap_already() { let mut c = Cell::zero(); assert!(!c.trap()); }
+    #[test] fn cell_settled() { let mut c = Cell::pos(); for _ in 0..10 { c.tick(); } assert!(c.is_settled(5)); }
+    #[test] fn cell_active() { assert!(Cell::pos().is_active()); assert!(!Cell::zero().is_active()); }
+    #[test] fn cell_spindle() { assert!(Cell::zero().is_spindle()); assert!(!Cell::pos().is_spindle()); }
+    #[test] fn cell_oscillating() { let mut c = Cell::pos(); for _ in 0..10 { c.flip(); } assert!(c.is_oscillating(5)); }
+    #[test] fn cell_from_byte() { assert_eq!(Cell::from_byte(0).state, -1); assert_eq!(Cell::from_byte(1).state, 0); assert_eq!(Cell::from_byte(2).state, 1); }
+    #[test] fn cell_charge() { assert_eq!(Cell::pos().charge(), 1); assert_eq!(Cell::neg().charge(), -1); assert_eq!(Cell::zero().charge(), 0); }
+    #[test] fn cell_abs_charge() { assert_eq!(Cell::neg().abs_charge(), 1); }
+    #[test] fn cell_size() { assert!(std::mem::size_of::<Cell>() <= 3); }
 
-    #[test]
-    fn test_messenger_combine() {
-        assert_eq!(TernaryMessenger::combine(TernaryMessenger::Signal, TernaryMessenger::Suppress), TernaryMessenger::Signal);
-        assert_eq!(TernaryMessenger::combine(TernaryMessenger::Silence, TernaryMessenger::Suppress), TernaryMessenger::Silence);
-    }
+    #[test] fn census_test() { let pop = vec![Cell::pos(), Cell::zero(), Cell::neg(), Cell::pos()]; let (n,z,p) = census(&pop); assert_eq!((n,z,p), (1,1,2)); }
+    #[test] fn gamma_test() { let pop = vec![Cell::pos(), Cell::pos(), Cell::neg()]; assert_eq!(gamma(&pop), 1); }
+    #[test] fn abs_gamma_test() { let pop = vec![Cell::pos(), Cell::neg(), Cell::zero()]; assert_eq!(abs_gamma(&pop), 2); }
+    #[test] fn fractions_test() { let pop = vec![Cell::pos(), Cell::neg(), Cell::zero()]; let (f1,f0,fp) = fractions(&pop); assert!((f1 - 1.0/3.0).abs() < 0.01); }
+    #[test] fn entropy_max() { let pop = vec![Cell::pos(), Cell::neg(), Cell::zero()]; let h = entropy(&pop); assert!(h > 1.5); }
+    #[test] fn entropy_min() { let pop = vec![Cell::pos(), Cell::pos(), Cell::pos()]; let h = entropy(&pop); assert!(h < 0.01); }
+    #[test] fn flip_rate_test() { let pop = vec![Cell::pos(), Cell::neg()]; let r = flip_rate(&pop); assert!(r >= 0.0); }
+    #[test] fn health_alive() { let mut pop = vec![Cell::pos(), Cell::neg(), Cell::pos(), Cell::neg()]; for c in &mut pop { for _ in 0..5 { c.flip(); } } assert_eq!(health(&pop), Health::Alive); }
+    #[test] fn health_dead() { let mut pop = vec![Cell::zero(); 100]; for c in &mut pop { for _ in 0..20 { c.tick(); } } assert_eq!(health(&pop), Health::Dead); }
+    #[test] fn health_empty() { let pop: Vec<Cell> = vec![]; assert_eq!(health(&pop), Health::Empty); }
 
-    #[test]
-    fn test_cell_new() {
-        let cell = TernaryCell::new(0);
-        assert_eq!(cell.ternary_value, 0);
-        assert_eq!(cell.energy, 10);
-        assert!(cell.is_alive());
-    }
-
-    #[test]
-    fn test_cell_tick_basic() {
-        let mut cell = TernaryCell::new(0);
-        let surprise = cell.tick();
-        assert_eq!(surprise, 0); // no signals, no change
-        assert_eq!(cell.tick_count, 1);
-    }
-
-    #[test]
-    fn test_cell_receive_and_tick() {
-        let mut cell = TernaryCell::new(0);
-        cell.receive(TernaryMessenger::Signal);
-        cell.receive(TernaryMessenger::Signal);
-        cell.tick();
-        assert_eq!(cell.ternary_value, 1);
-    }
-
-    #[test]
-    fn test_cell_divide() {
-        let mut cell = TernaryCell::with_value(0, 1);
-        let daughter = cell.divide(1);
-        assert!(daughter.is_some());
-        assert_eq!(daughter.unwrap().generation, 1);
-        assert_eq!(cell.energy, 5);
-    }
-
-    #[test]
-    fn test_cell_cannot_divide_low_energy() {
-        let mut cell = TernaryCell::new(0);
-        cell.energy = 3;
-        assert!(cell.divide(1).is_none());
-    }
-
-    #[test]
-    fn test_cell_apoptosis() {
-        let mut cell = TernaryCell::new(0);
-        cell.energy = 1;
-        // Lots of surprise to drain energy
-        cell.receive(TernaryMessenger::Signal);
-        cell.predict();
-        cell.ternary_value = -1; // force mismatch
-        let s = cell.compute_surprise();
-        assert_eq!(s, 2); // |-1 - 1| = 2
-        cell.vibe();
-        assert_eq!(cell.energy, -1);
-        cell.gc();
-        cell.conservation();
-        assert_eq!(cell.state, CellState::Apoptotic);
-    }
-
-    #[test]
-    fn test_cell_emit() {
-        let cell = TernaryCell::with_value(0, 1);
-        assert_eq!(cell.emit(), TernaryMessenger::Signal);
-    }
-
-    #[test]
-    fn test_grid_place_and_get() {
-        let mut grid = CellGrid::new(3, 3);
-        grid.place(1, 1, 1);
-        assert!(grid.get(1, 1).is_some());
-        assert_eq!(grid.get(1, 1).unwrap().ternary_value, 1);
-    }
-
-    #[test]
-    fn test_grid_neighbors() {
-        let grid = CellGrid::new(3, 3);
-        let neighbors = grid.neighbors(1, 1);
-        assert_eq!(neighbors.len(), 4);
-    }
-
-    #[test]
-    fn test_grid_corner_neighbors() {
-        let grid = CellGrid::new(3, 3);
-        let neighbors = grid.neighbors(0, 0);
-        assert_eq!(neighbors.len(), 2);
-    }
-
-    #[test]
-    fn test_grid_tick_all() {
-        let mut grid = CellGrid::new(2, 2);
-        grid.place(0, 0, 1);
-        grid.place(1, 0, 1);
-        grid.place(0, 1, -1);
-        grid.place(1, 1, -1);
-        let alive = grid.tick_all();
-        assert_eq!(alive, 4);
-    }
-
-    #[test]
-    fn test_grid_tissue_balance() {
-        let mut grid = CellGrid::new(2, 2);
-        grid.place(0, 0, 1);
-        grid.place(1, 0, 0);
-        grid.place(0, 1, -1);
-        grid.place(1, 1, 1);
-        let (pos, zero, neg) = grid.tissue_balance();
-        assert_eq!(pos, 2);
-        assert_eq!(zero, 1);
-        assert_eq!(neg, 1);
-    }
-
-    #[test]
-    fn test_tissue_convergence() {
-        let mut tissue = Tissue::new(2, 2);
-        tissue.fill_pattern(&[1, 1, 1, 1]);
-        assert!(tissue.is_converged());
-    }
-
-    #[test]
-    fn test_tissue_not_converged() {
-        let mut tissue = Tissue::new(2, 2);
-        tissue.fill_pattern(&[1, -1, 1, -1]);
-        assert!(!tissue.is_converged());
-    }
-
-    #[test]
-    fn test_tissue_consensus() {
-        let mut tissue = Tissue::new(3, 1);
-        tissue.fill_pattern(&[1, 1, -1]);
-        assert_eq!(tissue.consensus(), 1);
-    }
-
-    #[test]
-    fn test_tissue_run() {
-        let mut tissue = Tissue::new(2, 2);
-        tissue.fill_pattern(&[1, 0, -1, 0]);
-        let alive = tissue.run(3);
-        assert!(alive <= 4);
-    }
-
-    #[test]
-    fn test_cell_with_value_clamps() {
-        let cell = TernaryCell::with_value(0, 5);
-        assert_eq!(cell.ternary_value, 1);
-        let cell2 = TernaryCell::with_value(1, -3);
-        assert_eq!(cell2.ternary_value, -1);
-    }
-
-    #[test]
-    fn test_grid_out_of_bounds() {
-        let grid = CellGrid::new(2, 2);
-        assert!(grid.get(5, 5).is_none());
-    }
-
-    #[test]
-    fn test_cell_tick_with_surprise() {
-        let mut cell = TernaryCell::with_value(0, 1);
-        cell.receive(TernaryMessenger::Suppress);
-        cell.tick();
-        // Prediction based on inbox (-1) -> pred=-1, but perceive changes to -1
-        // Actually: predict sets prediction=-1, perceive sets value=-1, surprise = |-1-(-1)|=0
-        // Let me trace: inbox=[Suppress], combined=-1, prediction=-1, perceive sets ternary=-1
-        // surprise = |-1 - (-1)| = 0
-        assert_eq!(cell.surprise, 0);
-    }
+    #[test] fn tick_all_test() { let mut pop = vec![Cell::pos(), Cell::neg()]; tick_all(&mut pop); assert_eq!(pop[0].dwell, 1); }
+    #[test] fn apply_rule_test() { let mut pop = vec![Cell::pos(), Cell::neg()]; apply_rule(&mut pop, |_s, _i| 0); assert!(pop.iter().all(|c| c.state == 0)); }
+    #[test] fn apply_neighbor_majority() { let mut pop = vec![Cell::pos(), Cell::pos(), Cell::neg(), Cell::pos(), Cell::pos()]; apply_neighbor_rule(&mut pop, |me, l, r| { let sum = me as i32 + l as i32 + r as i32; if sum > 0 { 1 } else if sum < 0 { -1 } else { 0 } }); assert!(pop.iter().all(|c| c.state >= 0)); }
+    #[test] fn rng_deterministic() { let mut r1 = Rng::new(42); let mut r2 = Rng::new(42); assert_eq!(r1.next_u8(), r2.next_u8()); assert_eq!(r1.next_u8(), r2.next_u8()); }
+    #[test] fn random_pop_distribution() { let mut rng = Rng::new(42); let pop = random_pop(300, 0.33, 0.34, &mut rng); let (n,z,p) = census(&pop); assert!(n > 50 && z > 50 && p > 50); }
+    #[test] fn from_bytes_test() { let pop = from_bytes(10, &[0,1,2,0,1,2,0,1,2,0]); assert_eq!(pop.len(), 10); }
 }

@@ -2,5 +2,5 @@
 name = "ternary-cell"
 version = "0.1.0"
 edition = "2021"
+description = "Minimal ternary cell — 3 bytes, stack-allocated, instantiable by the million. The atomic unit of scale."
 license = "MIT"
-description = "Cellular computing inspired by room-cell and biological cells"
