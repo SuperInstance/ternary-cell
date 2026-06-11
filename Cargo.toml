@@ -1,7 +1,7 @@
 [package]
 repository = "https://github.com/SuperInstance/ternary-cell"
 name = "ternary-cell"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Minimal ternary cell — 3 bytes, stack-allocated, instantiable by the million. The atomic unit of scale."
 license = "MIT"
